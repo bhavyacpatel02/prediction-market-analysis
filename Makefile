@@ -1,4 +1,4 @@
-.PHONY: analyze run index package lint format test setup
+.PHONY: analyze run index package lint format test setup mention-app
 
 RUN = uv run main.py
 
@@ -24,6 +24,9 @@ format:
 
 test:
 	uv run pytest tests/ -v
+
+mention-app:
+	uv run streamlit run src/app/mention_lookup.py
 
 setup:
 	bash scripts/install-tools.sh

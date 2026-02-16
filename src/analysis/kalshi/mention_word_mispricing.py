@@ -6,9 +6,13 @@ subcategory-level findings from mention_market_analysis.py by providing word-lev
 granularity for tradeable edges.
 
 Key metrics per word:
-- vol_weighted_price: volume-weighted average YES price (implied probability)
-- actual_yes_rate: contract-weighted YES resolution rate * 100
+- vol_weighted_price: contract-weighted average YES price (what the market believed)
+- actual_yes_rate: market-weighted YES resolution rate * 100 (how often the word was mentioned)
 - mispricing_pp: actual_yes_rate - vol_weighted_price (positive = underpriced YES)
+
+Statistical approach: actual_yes_rate is computed per-market (each market = one independent
+Bernoulli trial), while vol_weighted_price is contract-weighted (reflects dollar-weighted
+consensus). Minimum threshold is n_markets >= 10 for statistical significance.
 """
 
 from __future__ import annotations
@@ -20,6 +24,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from src.analysis.kalshi.mention_queries import (
+    query_word_by_price_bucket,
+    query_word_by_speaker,
+    query_word_mispricing,
+)
 from src.common.analysis import Analysis, AnalysisOutput
 from src.common.interfaces.chart import ChartConfig, ChartType, UnitType
 
@@ -66,120 +75,15 @@ class MentionWordMispricingAnalysis(Analysis):
 
     def _query_word_mispricing(self, con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
         """Core query: mispricing grouped by yes_sub_title (the word/phrase)."""
-        return con.execute(
-            f"""
-            WITH mention_markets AS (
-                SELECT ticker, event_ticker, yes_sub_title, result
-                FROM '{self.markets_dir}/*.parquet'
-                WHERE status = 'finalized'
-                  AND result IN ('yes', 'no')
-                  AND UPPER(event_ticker) LIKE '%MENTION%'
-                  AND UPPER(event_ticker) NOT LIKE '%MENTIONSSINGLE%'
-                  AND yes_sub_title IS NOT NULL
-                  AND yes_sub_title != ''
-            )
-            SELECT
-                m.yes_sub_title AS word,
-                COUNT(DISTINCT m.ticker) AS n_markets,
-                SUM(t.count) AS total_contracts,
-                SUM(t.yes_price * t.count) * 1.0 / SUM(t.count) AS vol_weighted_price,
-                SUM(CASE WHEN m.result = 'yes' THEN t.count ELSE 0 END) * 100.0
-                    / SUM(t.count) AS actual_yes_rate,
-                SUM(CASE WHEN m.result = 'yes' THEN t.count ELSE 0 END) * 100.0
-                    / SUM(t.count)
-                    - SUM(t.yes_price * t.count) * 1.0 / SUM(t.count) AS mispricing_pp
-            FROM '{self.trades_dir}/*.parquet' t
-            INNER JOIN mention_markets m ON t.ticker = m.ticker
-            GROUP BY m.yes_sub_title
-            HAVING SUM(t.count) >= 5000
-            ORDER BY mispricing_pp DESC
-            """
-        ).df()
+        return query_word_mispricing(con, self.trades_dir, self.markets_dir)
 
     def _query_word_by_speaker(self, con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
         """Mispricing grouped by (word, speaker) to reveal context dependence."""
-        return con.execute(
-            f"""
-            WITH mention_markets AS (
-                SELECT
-                    ticker, event_ticker, yes_sub_title, result,
-                    regexp_extract(UPPER(event_ticker), 'KX([A-Z]+)MENTION', 1) AS speaker
-                FROM '{self.markets_dir}/*.parquet'
-                WHERE status = 'finalized'
-                  AND result IN ('yes', 'no')
-                  AND UPPER(event_ticker) LIKE '%MENTION%'
-                  AND UPPER(event_ticker) NOT LIKE '%MENTIONSSINGLE%'
-                  AND yes_sub_title IS NOT NULL
-                  AND yes_sub_title != ''
-            )
-            SELECT
-                m.yes_sub_title AS word,
-                m.speaker,
-                COUNT(DISTINCT m.ticker) AS n_markets,
-                SUM(t.count) AS total_contracts,
-                SUM(t.yes_price * t.count) * 1.0 / SUM(t.count) AS vol_weighted_price,
-                SUM(CASE WHEN m.result = 'yes' THEN t.count ELSE 0 END) * 100.0
-                    / SUM(t.count) AS actual_yes_rate,
-                SUM(CASE WHEN m.result = 'yes' THEN t.count ELSE 0 END) * 100.0
-                    / SUM(t.count)
-                    - SUM(t.yes_price * t.count) * 1.0 / SUM(t.count) AS mispricing_pp
-            FROM '{self.trades_dir}/*.parquet' t
-            INNER JOIN mention_markets m ON t.ticker = m.ticker
-            WHERE m.speaker IS NOT NULL AND m.speaker != ''
-            GROUP BY m.yes_sub_title, m.speaker
-            HAVING SUM(t.count) >= 1000
-            ORDER BY ABS(mispricing_pp) DESC
-            """
-        ).df()
+        return query_word_by_speaker(con, self.trades_dir, self.markets_dir)
 
     def _query_word_by_price_bucket(self, con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
-        """Mispricing by price bucket for the top 20 most-traded words."""
-        return con.execute(
-            f"""
-            WITH mention_markets AS (
-                SELECT ticker, event_ticker, yes_sub_title, result
-                FROM '{self.markets_dir}/*.parquet'
-                WHERE status = 'finalized'
-                  AND result IN ('yes', 'no')
-                  AND UPPER(event_ticker) LIKE '%MENTION%'
-                  AND UPPER(event_ticker) NOT LIKE '%MENTIONSSINGLE%'
-                  AND yes_sub_title IS NOT NULL
-                  AND yes_sub_title != ''
-            ),
-            top_words AS (
-                SELECT m.yes_sub_title
-                FROM '{self.trades_dir}/*.parquet' t
-                INNER JOIN mention_markets m ON t.ticker = m.ticker
-                GROUP BY m.yes_sub_title
-                HAVING SUM(t.count) >= 5000
-                ORDER BY SUM(t.count) DESC
-                LIMIT 20
-            )
-            SELECT
-                m.yes_sub_title AS word,
-                CASE
-                    WHEN t.yes_price BETWEEN 1 AND 20 THEN '1-20'
-                    WHEN t.yes_price BETWEEN 21 AND 40 THEN '21-40'
-                    WHEN t.yes_price BETWEEN 41 AND 60 THEN '41-60'
-                    WHEN t.yes_price BETWEEN 61 AND 80 THEN '61-80'
-                    WHEN t.yes_price BETWEEN 81 AND 99 THEN '81-99'
-                END AS price_bucket,
-                SUM(t.count) AS total_contracts,
-                SUM(CASE WHEN m.result = 'yes' THEN t.count ELSE 0 END) * 100.0
-                    / SUM(t.count) AS actual_yes_rate,
-                SUM(t.yes_price * t.count) * 1.0 / SUM(t.count) AS vol_weighted_price,
-                SUM(CASE WHEN m.result = 'yes' THEN t.count ELSE 0 END) * 100.0
-                    / SUM(t.count)
-                    - SUM(t.yes_price * t.count) * 1.0 / SUM(t.count) AS mispricing_pp
-            FROM '{self.trades_dir}/*.parquet' t
-            INNER JOIN mention_markets m ON t.ticker = m.ticker
-            INNER JOIN top_words tw ON m.yes_sub_title = tw.yes_sub_title
-            WHERE t.yes_price BETWEEN 1 AND 99
-            GROUP BY m.yes_sub_title, price_bucket
-            HAVING SUM(t.count) > 0
-            ORDER BY m.yes_sub_title, price_bucket
-            """
-        ).df()
+        """Mispricing by price bucket for top 20 words (by n_markets)."""
+        return query_word_by_price_bucket(con, self.trades_dir, self.markets_dir)
 
     def _create_figure(
         self,
@@ -192,7 +96,7 @@ class MentionWordMispricingAnalysis(Analysis):
 
         self._plot_overpriced(axes[0, 0], word_df)
         self._plot_underpriced(axes[0, 1], word_df)
-        self._plot_mispricing_vs_volume(axes[0, 2], word_df)
+        self._plot_mispricing_vs_markets(axes[0, 2], word_df)
         self._plot_speaker_heatmap(axes[1, 0], speaker_df)
         self._plot_bucket_heatmap(axes[1, 1], bucket_df)
         self._plot_summary(axes[1, 2], word_df)
@@ -243,19 +147,19 @@ class MentionWordMispricingAnalysis(Analysis):
         ax.set_xlabel("Mispricing (pp)")
         ax.invert_yaxis()
 
-    def _plot_mispricing_vs_volume(self, ax: plt.Axes, df: pd.DataFrame) -> None:
-        """Panel (0,2): Scatter of mispricing vs log(volume), sized by n_markets."""
-        ax.set_title("Mispricing vs Volume")
+    def _plot_mispricing_vs_markets(self, ax: plt.Axes, df: pd.DataFrame) -> None:
+        """Panel (0,2): Scatter of mispricing vs n_markets, sized by total_contracts."""
+        ax.set_title("Mispricing vs # Markets")
 
         if df.empty:
             ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
             return
 
-        sizes = np.clip(df["n_markets"].values * 3, 10, 200)
+        sizes = np.clip(np.log10(df["total_contracts"].values) * 15, 10, 200)
         colors = ["#2ecc71" if m > 0 else "#e74c3c" for m in df["mispricing_pp"]]
 
         ax.scatter(
-            np.log10(df["total_contracts"]),
+            df["n_markets"],
             df["mispricing_pp"],
             s=sizes,
             c=colors,
@@ -264,7 +168,7 @@ class MentionWordMispricingAnalysis(Analysis):
             linewidth=0.5,
         )
         ax.axhline(y=0, color="gray", linestyle="--", linewidth=1)
-        ax.set_xlabel("log10(Total Contracts)")
+        ax.set_xlabel("# Independent Markets")
         ax.set_ylabel("Mispricing (pp)")
         ax.grid(True, alpha=0.3)
 
@@ -272,7 +176,7 @@ class MentionWordMispricingAnalysis(Analysis):
         for _, row in df.nlargest(3, "mispricing_pp").iterrows():
             ax.annotate(
                 row["word"],
-                (np.log10(row["total_contracts"]), row["mispricing_pp"]),
+                (row["n_markets"], row["mispricing_pp"]),
                 fontsize=6,
                 ha="center",
                 va="bottom",
@@ -280,7 +184,7 @@ class MentionWordMispricingAnalysis(Analysis):
         for _, row in df.nsmallest(3, "mispricing_pp").iterrows():
             ax.annotate(
                 row["word"],
-                (np.log10(row["total_contracts"]), row["mispricing_pp"]),
+                (row["n_markets"], row["mispricing_pp"]),
                 fontsize=6,
                 ha="center",
                 va="top",
