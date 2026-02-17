@@ -12,6 +12,7 @@ Python framework for analyzing prediction market data from Polymarket and Kalshi
 make analyze              # Interactive analysis menu
 make run <analysis_name>  # Run specific analysis by snake_case name
 make index                # Interactive indexer menu (data collection)
+make mention-app          # Run Streamlit mention market lookup app
 make test                 # Run all tests
 make lint                 # Check linting (ruff check + ruff format --check)
 make format               # Auto-fix lint and format
@@ -39,6 +40,14 @@ Organized by platform: `kalshi/`, `polymarket/`, `comparison/`. Each analysis:
 - Constructor accepts optional `Path` params (e.g. `trades_dir`, `markets_dir`) for test injection, defaulting to `data/<platform>/<type>` via `Path(__file__).parent.parent.parent.parent`
 - Uses DuckDB glob queries (`'{dir}/*.parquet'`) to read chunked Parquet data
 - `FuncAnimation` outputs save as GIF; static `Figure` outputs save as PNG/PDF/SVG
+
+### Shared Query Modules
+
+When DuckDB queries are needed by both batch analyses and interactive apps, extract them into standalone functions in a separate module (e.g. `src/analysis/kalshi/mention_queries.py`). The analysis class becomes a thin wrapper calling the shared function, and Streamlit apps import the same functions directly. Parameterize thresholds like `min_markets` so apps can load broader data and filter client-side.
+
+### Streamlit Apps (`src/app/`)
+
+Interactive browser-based tools. Run via `uv run streamlit run src/app/<name>.py`. These files must add the project root to `sys.path` before `src.*` imports since Streamlit runs them as standalone scripts. Use `@st.cache_data(ttl=3600)` for expensive DuckDB queries.
 
 ### Indexer Classes (`src/indexers/`)
 
@@ -75,4 +84,12 @@ Ruff with Python 3.9 target, 120 char line length. Rules: E, W, F, I (isort), B 
 
 ## Environment Variables
 
-`POLYGON_RPC` — required for Polymarket blockchain indexer. Copy `.env.example` to `.env`.
+Copy `.env.example` to `.env`.
+
+- `POLYGON_RPC` — required for Polymarket blockchain indexer
+- `POLYMARKET_START_BLOCK` — starting block for Polymarket blockchain indexers (default: 33605403)
+
+## Documentation
+
+- [Data Schemas](docs/SCHEMAS.md) — Parquet file schemas for markets and trades
+- [Writing Analyses](docs/ANALYSIS.md) — Guide and templates for writing custom analysis scripts

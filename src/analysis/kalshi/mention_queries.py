@@ -37,6 +37,7 @@ def query_word_mispricing(
         ),
         market_outcomes AS (
             SELECT
+                LOWER(m.yes_sub_title) AS word_key,
                 m.yes_sub_title,
                 m.ticker,
                 m.result,
@@ -45,15 +46,16 @@ def query_word_mispricing(
         ),
         market_yes_rates AS (
             SELECT
-                yes_sub_title,
+                word_key,
+                mode(yes_sub_title) AS display_word,
                 COUNT(*) AS n_markets,
                 AVG(resolved_yes) * 100.0 AS actual_yes_rate
             FROM market_outcomes
-            GROUP BY yes_sub_title
+            GROUP BY word_key
             HAVING COUNT(*) >= {min_markets}
         )
         SELECT
-            r.yes_sub_title AS word,
+            r.display_word AS word,
             r.n_markets,
             SUM(t.count) AS total_contracts,
             SUM(t.yes_price * t.count) * 1.0 / SUM(t.count) AS vol_weighted_price,
@@ -62,8 +64,8 @@ def query_word_mispricing(
                 - SUM(t.yes_price * t.count) * 1.0 / SUM(t.count) AS mispricing_pp
         FROM '{trades_dir}/*.parquet' t
         INNER JOIN mention_markets m ON t.ticker = m.ticker
-        INNER JOIN market_yes_rates r ON m.yes_sub_title = r.yes_sub_title
-        GROUP BY r.yes_sub_title, r.n_markets, r.actual_yes_rate
+        INNER JOIN market_yes_rates r ON LOWER(m.yes_sub_title) = r.word_key
+        GROUP BY r.display_word, r.n_markets, r.actual_yes_rate
         ORDER BY mispricing_pp DESC
         """
     ).df()
@@ -92,6 +94,7 @@ def query_word_by_speaker(
         ),
         market_outcomes AS (
             SELECT
+                LOWER(m.yes_sub_title) AS word_key,
                 m.yes_sub_title,
                 m.speaker,
                 m.ticker,
@@ -101,16 +104,17 @@ def query_word_by_speaker(
         ),
         market_yes_rates AS (
             SELECT
-                yes_sub_title,
+                word_key,
+                mode(yes_sub_title) AS display_word,
                 speaker,
                 COUNT(*) AS n_markets,
                 AVG(resolved_yes) * 100.0 AS actual_yes_rate
             FROM market_outcomes
-            GROUP BY yes_sub_title, speaker
+            GROUP BY word_key, speaker
             HAVING COUNT(*) >= {min_markets}
         )
         SELECT
-            r.yes_sub_title AS word,
+            r.display_word AS word,
             r.speaker,
             r.n_markets,
             SUM(t.count) AS total_contracts,
@@ -121,9 +125,9 @@ def query_word_by_speaker(
         FROM '{trades_dir}/*.parquet' t
         INNER JOIN mention_markets m ON t.ticker = m.ticker
         INNER JOIN market_yes_rates r
-            ON m.yes_sub_title = r.yes_sub_title
+            ON LOWER(m.yes_sub_title) = r.word_key
             AND regexp_extract(UPPER(m.event_ticker), 'KX([A-Z]+)MENTION', 1) = r.speaker
-        GROUP BY r.yes_sub_title, r.speaker, r.n_markets, r.actual_yes_rate
+        GROUP BY r.display_word, r.speaker, r.n_markets, r.actual_yes_rate
         ORDER BY ABS(mispricing_pp) DESC
         """
     ).df()
@@ -155,6 +159,7 @@ def query_word_by_price_bucket(
         ),
         market_outcomes AS (
             SELECT
+                LOWER(yes_sub_title) AS word_key,
                 yes_sub_title,
                 ticker,
                 CASE WHEN result = 'yes' THEN 1.0 ELSE 0.0 END AS resolved_yes
@@ -162,21 +167,22 @@ def query_word_by_price_bucket(
         ),
         market_yes_rates AS (
             SELECT
-                yes_sub_title,
+                word_key,
+                mode(yes_sub_title) AS display_word,
                 COUNT(*) AS n_markets,
                 AVG(resolved_yes) * 100.0 AS actual_yes_rate
             FROM market_outcomes
-            GROUP BY yes_sub_title
+            GROUP BY word_key
             HAVING COUNT(*) >= {min_markets}
         ),
         top_words AS (
-            SELECT yes_sub_title
+            SELECT word_key, display_word
             FROM market_yes_rates
             ORDER BY n_markets DESC
             LIMIT {top_n}
         )
         SELECT
-            m.yes_sub_title AS word,
+            tw.display_word AS word,
             CASE
                 WHEN t.yes_price BETWEEN 1 AND 20 THEN '1-20'
                 WHEN t.yes_price BETWEEN 21 AND 40 THEN '21-40'
@@ -191,11 +197,11 @@ def query_word_by_price_bucket(
                 - SUM(t.yes_price * t.count) * 1.0 / SUM(t.count) AS mispricing_pp
         FROM '{trades_dir}/*.parquet' t
         INNER JOIN mention_markets m ON t.ticker = m.ticker
-        INNER JOIN top_words tw ON m.yes_sub_title = tw.yes_sub_title
-        INNER JOIN market_yes_rates r ON m.yes_sub_title = r.yes_sub_title
+        INNER JOIN top_words tw ON LOWER(m.yes_sub_title) = tw.word_key
+        INNER JOIN market_yes_rates r ON LOWER(m.yes_sub_title) = r.word_key
         WHERE t.yes_price BETWEEN 1 AND 99
-        GROUP BY m.yes_sub_title, price_bucket, r.actual_yes_rate
+        GROUP BY tw.display_word, price_bucket, r.actual_yes_rate
         HAVING SUM(t.count) > 0
-        ORDER BY m.yes_sub_title, price_bucket
+        ORDER BY tw.display_word, price_bucket
         """
     ).df()

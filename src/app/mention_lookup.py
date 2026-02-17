@@ -40,13 +40,6 @@ def main():
     st.set_page_config(page_title="Mention Mispricing Lookup", page_icon="📊", layout="wide")
     st.title("Mention Market Mispricing Lookup")
 
-    # Sidebar controls
-    with st.sidebar:
-        st.header("Search")
-        search_term = st.text_input("Word or phrase", placeholder="e.g. Tariff, China, Risk")
-        min_markets = st.slider("Min markets threshold", min_value=1, max_value=50, value=10)
-        show_low_sample = st.checkbox("Include low-sample words in browse table", value=False)
-
     # Load data
     data = load_word_data()
     word_df = data["words"]
@@ -56,84 +49,65 @@ def main():
         st.error("No mention market data found. Run `make setup` to download data first.")
         return
 
+    # Build sorted word list for the selectbox
+    word_list = sorted(word_df["word"].tolist(), key=str.lower)
+
+    # Sidebar controls
+    with st.sidebar:
+        st.header("Search")
+        selected_word = st.selectbox(
+            "Select a word", options=[""] + word_list, format_func=lambda x: x or "Type to search..."
+        )
+        min_markets = st.slider("Min markets threshold", min_value=1, max_value=50, value=10)
+        show_low_sample = st.checkbox("Include low-sample words in browse table", value=False)
+
     # Search result section
-    if search_term:
-        term_lower = search_term.strip().lower()
+    if selected_word:
+        row = word_df[word_df["word"] == selected_word].iloc[0]
 
-        # Exact match first, then partial
-        exact = word_df[word_df["word"].str.lower() == term_lower]
-        if not exact.empty:
-            match_df = exact
+        if row["n_markets"] < 10:
+            st.warning(f"Low sample size: only {int(row['n_markets'])} markets. Statistical confidence is limited.")
+
+        st.subheader(f"**{row['word']}**")
+
+        # Metric cards
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Edge (pp)", f"{row['mispricing_pp']:+.1f}")
+        col2.metric("Actual YES Rate", f"{row['actual_yes_rate']:.1f}%")
+        col3.metric("Market Price", f"{row['vol_weighted_price']:.1f}¢")
+        col4.metric("Markets / Contracts", f"{int(row['n_markets'])} / {int(row['total_contracts']):,}")
+
+        # Trade signal
+        edge = row["mispricing_pp"]
+        if edge > 0:
+            st.success(
+                f"**BUY YES** — Market prices this at {row['vol_weighted_price']:.1f}¢ "
+                f"but it resolves YES {row['actual_yes_rate']:.1f}% of the time. "
+                f"Edge: {edge:+.1f}pp."
+            )
         else:
-            match_df = word_df[word_df["word"].str.lower().str.contains(term_lower, na=False)]
+            st.error(
+                f"**BUY NO** — Market prices this at {row['vol_weighted_price']:.1f}¢ "
+                f"but it resolves YES only {row['actual_yes_rate']:.1f}% of the time. "
+                f"Edge: {edge:+.1f}pp."
+            )
 
-        if match_df.empty:
-            st.warning(f"No results for '{search_term}'.")
-        else:
-            # Show first exact/best match in detail
-            row = match_df.iloc[0]
-
-            if row["n_markets"] < 10:
-                st.warning(f"Low sample size: only {int(row['n_markets'])} markets. Statistical confidence is limited.")
-
-            st.subheader(f"**{row['word']}**")
-
-            # Metric cards
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Edge (pp)", f"{row['mispricing_pp']:+.1f}")
-            col2.metric("Actual YES Rate", f"{row['actual_yes_rate']:.1f}%")
-            col3.metric("Market Price", f"{row['vol_weighted_price']:.1f}¢")
-            col4.metric("Markets / Contracts", f"{int(row['n_markets'])} / {int(row['total_contracts']):,}")
-
-            # Trade signal
-            edge = row["mispricing_pp"]
-            if edge > 0:
-                st.success(
-                    f"**BUY YES** — Market prices this at {row['vol_weighted_price']:.1f}¢ "
-                    f"but it resolves YES {row['actual_yes_rate']:.1f}% of the time. "
-                    f"Edge: {edge:+.1f}pp."
-                )
-            else:
-                st.error(
-                    f"**BUY NO** — Market prices this at {row['vol_weighted_price']:.1f}¢ "
-                    f"but it resolves YES only {row['actual_yes_rate']:.1f}% of the time. "
-                    f"Edge: {edge:+.1f}pp."
-                )
-
-            # Speaker breakdown
-            if speaker_df is not None and not speaker_df.empty:
-                word_speakers = speaker_df[speaker_df["word"].str.lower() == row["word"].lower()]
-                if not word_speakers.empty:
-                    st.subheader("Speaker Breakdown")
-                    display_cols = [
-                        "speaker",
-                        "n_markets",
-                        "total_contracts",
-                        "vol_weighted_price",
-                        "actual_yes_rate",
-                        "mispricing_pp",
-                    ]
-                    available_cols = [c for c in display_cols if c in word_speakers.columns]
-                    st.dataframe(
-                        word_speakers[available_cols].sort_values("mispricing_pp", ascending=False),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-            # Show other partial matches if any
-            if len(match_df) > 1:
-                st.subheader("Other matches")
+        # Speaker breakdown
+        if speaker_df is not None and not speaker_df.empty:
+            word_speakers = speaker_df[speaker_df["word"].str.lower() == row["word"].lower()]
+            if not word_speakers.empty:
+                st.subheader("Speaker Breakdown")
+                display_cols = [
+                    "speaker",
+                    "n_markets",
+                    "total_contracts",
+                    "vol_weighted_price",
+                    "actual_yes_rate",
+                    "mispricing_pp",
+                ]
+                available_cols = [c for c in display_cols if c in word_speakers.columns]
                 st.dataframe(
-                    match_df.iloc[1:][
-                        [
-                            "word",
-                            "n_markets",
-                            "total_contracts",
-                            "vol_weighted_price",
-                            "actual_yes_rate",
-                            "mispricing_pp",
-                        ]
-                    ],
+                    word_speakers[available_cols].sort_values("mispricing_pp", ascending=False),
                     use_container_width=True,
                     hide_index=True,
                 )
